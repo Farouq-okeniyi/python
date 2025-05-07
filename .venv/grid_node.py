@@ -1,95 +1,102 @@
 import psycopg2
 import importlib
-import base64
 import time
 import psutil
 from prometheus_client import start_http_server, Summary, Gauge, Counter
 
-# ========== Configuration ==========
+# =========1= Configuration ==========
 
 # Start Prometheus HTTP server
 start_http_server(8000)
 print("Prometheus server running on port 8000...")
-#hello
 
-#hi
 # Prometheus Metrics
 REQUEST_TIME = Summary('encryption_request_processing_seconds', 'Time spent processing encryption per request')
 CPU_USAGE = Gauge('encryption_cpu_usage_percent', 'CPU usage percentage during encryption')
-MEMORY_USAGE = Gauge('encryption_memory_usage_mb', 'Memory usage (MB) during encryption')
+MEMORY_USAGE = Gauge('encryption_memory_usage_kb', 'Memory usage (kb) during encryption')
 BYTES_ENCRYPTED = Counter('encryption_bytes_total', 'Total number of bytes encrypted')
 ENCRYPTION_OPERATIONS = Counter('encryption_operations_total', 'Total encryption operations performed')
 ENCRYPTION_FAILURES = Counter('encryption_failures_total', 'Total failed encryption operations')
-KEY_ROTATIONS = Counter('encryption_key_rotations_total', 'Total number of encryption key rotations')
-KEY_EXPIRY_SECONDS = Gauge('encryption_key_expiry_seconds_remaining', 'Seconds remaining before key expires')
-ENCRYPTION_QUEUE_LENGTH = Gauge('encryption_queue_length', 'Current encryption queue size')
-CURRENT_ENCRYPTIONS = Gauge('current_   encryption_sessions', 'Concurrent encryption operations')
 
-
-# Select Encryption Algorithm Module (change this easily)
+# Load encryption module (make sure it has `encrypt()` and `decrypt()` functions)
 encryption_module = importlib.import_module("Encryption.aes_encryption")
-# Example modules: Encryption.aes_encryption, Encryption.blowfish_encryption, Encryption.rsa_encryption, Encryption.ecc_encryption
 
-# Database (Grid Nodes)
+# Grid nodes
 grid_nodes = [
     {"dbname": "grid_node_1", "user": "postgres", "password": "panda020704", "host": "localhost", "port": 5433},
     {"dbname": "grid_node_2", "user": "postgres", "password": "panda020704", "host": "localhost", "port": 5433},
-    {"dbname": "grid_node_3", "user": "postgres", "password": "panda020704", "host": "localhost", "port": 5433},
 ]
 
-# ========== Functions ==========
+# ========== Helper Functions ==========
 
 def get_system_usage():
-    CPU_USAGE.set(psutil.cpu_percent(interval=1))  # CPU percentage
-    MEMORY_USAGE.set(psutil.virtual_memory().used / (1024 * 1024))  # RAM used in MB
+    CPU_USAGE.set(psutil.cpu_percent(interval=1))
+    MEMORY_USAGE.set(psutil.virtual_memory().used / (1024 * 1024))
 
-# Encrypt process for a node
-def encrypt_data(raw_data):
+def encrypt_value(value):
     @REQUEST_TIME.time()
     def process():
-        # Encrypt multiple times to simulate heavier load
-        for _ in range(1000):
-            encrypted = encryption_module.encrypt(raw_data)
-        return encrypted
-
+        return encryption_module.encrypt(value)
     return process()
 
-# ========== Main Monitoring Loop ==========
-i=0
-while i<=1000:
-    for node in grid_nodes:
-        try:
-            print(f"\nConnecting to {node['dbname']}...")
-            conn = psycopg2.connect(**node)
-            cursor = conn.cursor()
+def decrypt_value(encrypted_value):
+    @REQUEST_TIME.time()
+    def process():
+        return encryption_module.decrypt(encrypted_value)
+    return process()
 
-            cursor.execute("SELECT * FROM data_store;")
-            rows = cursor.fetchall()
+# ========== Main Function ==========
 
-            print(f"Data from {node['dbname']}:")
-            for row in rows:
-                raw = str(row)
+def encrypt_and_transfer_one_row(source_node, target_node):
+    try:
+        print(f"\n[INFO] Connecting to source: {source_node['dbname']}")
+        source_conn = psycopg2.connect(**source_node)
+        source_cursor = source_conn.cursor()
 
-                # Monitor system usage
-                get_system_usage()
+        source_cursor.execute("SELECT id, text_to_encrypt FROM data_store LIMIT 1;")
+        row = source_cursor.fetchone()
 
-                # Encrypt the data
-                encrypted = encrypt_data(raw)
+        if not row:
+            print("[WARN] No data found in source node.")
+            return
 
-                # Optional: you can decrypt also if you want
-                # decrypted = encryption_module.decrypt(encrypted)
+        row_id, text_to_encrypt = row
+        # print(f"[DATA] id={row_id}, text_to_encrypt={text_to_encrypt}")  
 
-                print(f"Original: {raw}")
-                print(f"Encrypted (short): {str(encrypted)[:30]}...\n")
-                i = i+1
-            cursor.close()
-            conn.close()
-        
-            
-        
-        except Exception as e:
-            print(f"Failed to connect to {node['dbname']}: {e}")
+        # Encrypt the `text_to_encrypt`
+        get_system_usage()
+        encrypted_text = encrypt_value(str(text_to_encrypt))
 
-    # Sleep a little to not overload Prometheus
-    time.sleep(5)
+        # Decrypt the `encrypted_text` to verify it
+        decrypted_text = decrypt_value(encrypted_text)
 
+        BYTES_ENCRYPTED.inc(len(str(text_to_encrypt).encode()))
+        ENCRYPTION_OPERATIONS.inc()
+
+        # print(f"[INFO] Connecting to target: {target_node['dbname']}")
+        target_conn = psycopg2.connect(**target_node)
+        target_cursor = target_conn.cursor()
+
+        target_cursor.execute(
+            "INSERT INTO data_store (text_to_encrypt, encrypted_text, decrypted_text) VALUES (%s, %s, %s);",
+            (text_to_encrypt, encrypted_text, decrypted_text)
+        )
+        target_conn.commit()
+
+        # print(f" Encrypted and decrypted row inserted into {target_node['dbname']}")
+        # print(f"[ENCRYPTED VALUE] {str(encrypted_text)[:30]}...\n")
+
+        # Clean up
+        # source_cursor.close()
+        # source_conn.close()
+        # target_cursor.close()
+        # target_conn.close()
+
+    except Exception as e:
+        ENCRYPTION_FAILURES.inc()
+        print(f"[ERROR] {e}")
+
+if __name__ == "__main__":
+    for i in range(250):
+        print(f"\n[RUNNING ITERATION] {i+1}/240")
+        encrypt_and_transfer_one_row(grid_nodes[0], grid_nodes[1])
