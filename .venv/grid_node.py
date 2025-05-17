@@ -3,7 +3,7 @@ import importlib
 import time
 import psutil
 from prometheus_client import start_http_server, Summary, Gauge, Counter
-
+import os
 # =========1= Configuration ==========
 
 # Start Prometheus HTTP server
@@ -32,6 +32,9 @@ grid_nodes = [
 def get_system_usage():
     CPU_USAGE.set(psutil.cpu_percent(interval=1))
     MEMORY_USAGE.set(psutil.virtual_memory().used / (1024 * 1024))
+
+with open("C:\\Users\\USER\\Documents\\pythonfinal\\1MB.txt", 'rb') as f:
+    file_data = f.read()
 
 def encrypt_value(value):
     @REQUEST_TIME.time()
@@ -65,7 +68,7 @@ def encrypt_and_transfer_one_row(source_node, target_node):
 
         # Encrypt the `text_to_encrypt`
         get_system_usage()
-        encrypted_text = encrypt_value(str(text_to_encrypt))
+        encrypted_text = encrypt_value(str(file_data))
 
         # Decrypt the `encrypted_text` to verify it
         decrypted_text = decrypt_value(encrypted_text)
@@ -100,3 +103,5 @@ if __name__ == "__main__":
     for i in range(250):
         print(f"\n[RUNNING ITERATION] {i+1}/240")
         encrypt_and_transfer_one_row(grid_nodes[0], grid_nodes[1])
+
+
