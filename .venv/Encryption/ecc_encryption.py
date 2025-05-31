@@ -7,8 +7,13 @@ import base64
 import json
 
 # Generate ECC key pair
-private_key = ECC.generate(curve='P-256')
-public_key = private_key.public_key()
+from Crypto.PublicKey import ECC
+
+with open("ecc_private.pem", "rt") as f:
+    private_key = ECC.import_key(f.read())
+
+with open("ecc_public.pem", "rt") as f:
+    public_key = ECC.import_key(f.read())
 
 def encrypt(data: str):
     # Generate ephemeral ECC key pair
