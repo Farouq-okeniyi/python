@@ -2,10 +2,10 @@ import psycopg2
 import importlib
 import psutil
 from prometheus_client import start_http_server, Summary, Gauge, Counter
+import time
 
 # ========== Configuration ==========
 start_http_server(8000)
-print("✅ Prometheus metrics server running on http://localhost:8000")
 
 # ========== Prometheus Metrics ==========
 REQUEST_TIME = Summary('crypto_processing_seconds', 'Time spent processing encryption/decryption')
@@ -13,19 +13,17 @@ REQUEST_TIME = Summary('crypto_processing_seconds', 'Time spent processing encry
 CPU_USAGE = Gauge('cpu_usage_percent', 'CPU usage percentage during crypto operations')
 MEMORY_USAGE = Gauge('memory_usage_mb', 'Memory usage (MB) during crypto operations')
 
-BYTES_ENCRYPTED = Counter('bytes_encrypted_total', 'Total number of bytes encrypted')
-ENCRYPTION_OPERATIONS = Counter('encryption_operations_total', 'Total encryption operations performed')
-ENCRYPTION_FAILURES = Counter('encryption_failures_total', 'Total failed encryption operations')
+BYTES_ENCRYPTED = Counter('bytes_encrypted_total', 'Total number of bytes encrypted', ['file_size_label'])
+ENCRYPTION_OPERATIONS = Counter('encryption_operations_total', 'Total encryption operations performed', ['file_size_label'])
+ENCRYPTION_FAILURES = Counter('encryption_failures_total', 'Total failed encryption operations', ['file_size_label'])
 
-DECRYPTION_OPERATIONS = Counter('decryption_operations_total', 'Total decryption operations performed')
-DECRYPTION_FAILURES = Counter('decryption_failures_total', 'Total failed decryption operations')
+DECRYPTION_OPERATIONS = Counter('decryption_operations_total', 'Total decryption operations performed', ['file_size_label'])
+DECRYPTION_FAILURES = Counter('decryption_failures_total', 'Total failed decryption operations', ['file_size_label'])
+
+ENCRYPTION_LOOP_ITERATIONS = Counter('encryption_loop_iterations_total', 'Total iterations of encryption loop', ['file_size_label'])
 
 # ========== Load AES Encryption Module ==========
-# AES = importlib.import_module("Encryption.aes_encryption")
-# BLOWFISH = importlib.import_module("Encryption.blowfish_encryption")
-# ECC = importlib.import_module("Encryption.ecc_encryption")
-# RSA = importlib.import_module("Encryption.rsa_encryption")
-CHACHA20 = importlib.import_module("Encryption.chacha20")
+AES = importlib.import_module("Encryption.aes_encryption")
 
 # ========== PostgreSQL Grid Nodes ==========
 grid_nodes = [
@@ -42,12 +40,12 @@ def get_system_usage():
 # ========== Encryption Wrapper ==========
 @REQUEST_TIME.time()
 def encrypt_value(value: str):
-    return CHACHA20.encrypt(value)
+    return AES.encrypt(value)
 
 # ========== Decryption Wrapper ==========
 @REQUEST_TIME.time()
 def decrypt_value(encrypted_value: str):
-    return CHACHA20.decrypt(encrypted_value)
+    return AES.decrypt(encrypted_value)
 
 # ========== Step 1: Insert Plaintext Files into Node 1 ==========
 def insert_plaintext_files(conn, cursor, files):
@@ -61,12 +59,11 @@ def insert_plaintext_files(conn, cursor, files):
                 VALUES (%s, %s)
             """, (size_label, decoded_text))
         conn.commit()
-        print("[INFO] Inserted plaintext files.")
     except Exception as e:
-        print(f"[ERROR - insert_plaintext_files] {e}")
+        print(f"[ERROR - file insert] {e}")
 
 # ========== Step 2: Encrypt from Node 1 to Node 2 ==========
-def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='1MB file', iterations=2):
+def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='1MB file', iterations=250):
     try:
         source_cursor.execute("""
             SELECT text_to_encrypt FROM data_store 
@@ -81,67 +78,63 @@ def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor,
         plain_text = row[0]
 
         for i in range(iterations):
+            print(f"[INFO] Encryption loop iteration {i + 1} for {label}")
             get_system_usage()
+
             encrypted = encrypt_value(plain_text)
 
-            BYTES_ENCRYPTED.inc(len(plain_text.encode()))
-            ENCRYPTION_OPERATIONS.inc()
+            BYTES_ENCRYPTED.labels(label).inc(len(plain_text.encode()))
+            ENCRYPTION_OPERATIONS.labels(label).inc()
+            ENCRYPTION_LOOP_ITERATIONS.labels(label).inc()
 
             target_cursor.execute("""
                 UPDATE data_store 
-                SET CHACHA20_ENCRYPTION = %s 
+                SET AES_ENCRYPTION = %s 
                 WHERE file_size_label = %s;
             """, (encrypted, label))
             target_conn.commit()
 
-        print(f"[DONE] CHACHA20 encryption complete for '{label}'")
+            time.sleep(0.1)  # Slow down loop for better Prometheus visualization
 
     except Exception as e:
-        ENCRYPTION_FAILURES.inc()
-        print(f"[ERROR - CHACHA20 encryption] {e}")
+        ENCRYPTION_FAILURES.labels(label).inc()
+        print(f"[ERROR - AES encryption] {e}")
 
 # ========== Step 3: Decrypt from Node 2 to Node 3 ==========
-
-
-def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='1MB file', iterations=2):
+def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='1MB file', iterations=250):
     try:
         source_cursor.execute("""
-            SELECT CHACHA20_ENCRYPTION FROM data_store 
+            SELECT AES_ENCRYPTION FROM data_store 
             WHERE file_size_label = %s 
             LIMIT 1;
         """, (label,))
         row = source_cursor.fetchone()
         if not row:
-            print(f"[INFO] No CHACHA20 encrypted data found for label '{label}'")
+            print(f"[INFO] No AES encrypted data found for label '{label}'")
             return
 
         encrypted_text = row[0]
 
         for i in range(iterations):
+            print(f"[INFO] Decryption loop iteration {i + 1} for {label}")
             decrypted = decrypt_value(encrypted_text)
+
+            DECRYPTION_OPERATIONS.labels(label).inc()
 
             target_cursor.execute("""
                 UPDATE data_store 
-                SET CHACHA20_DECRYPTION = %s 
+                SET AES_DECRYPTION = %s 
                 WHERE file_size_label = %s;
             """, (decrypted, label))
             target_conn.commit()
 
-        print(f"[DONE] CHACHA20 decryption complete for '{label}'")
+            time.sleep(0.1)
+
+        print(f"[DONE] AES decryption complete for '{label}'")
 
     except Exception as e:
-        DECRYPTION_FAILURES.inc()
-        print(f"[ERROR - ECC decryption] {e}")
-
-
-def store_encrypted_text(target_cursor, target_conn, label: str, plain_text: str):
-    encrypted_text = encrypt_value(plain_text)
-    target_cursor.execute("""
-        UPDATE data_store
-        SET encrypted_text = %s
-        WHERE file_size_label = %s;
-    """, (encrypted_text, label))
-    target_conn.commit()
+        DECRYPTION_FAILURES.labels(label).inc()
+        print(f"[ERROR - AES decryption] {e}")
 
 # ========== Main Execution ==========
 if __name__ == "__main__":
@@ -165,14 +158,14 @@ if __name__ == "__main__":
         conn3 = psycopg2.connect(**grid_nodes[2])
         cur3 = conn3.cursor()
 
-        # [OPTIONAL] Step 1: Insert plaintext files into Node 1 
+        # Optional: Step 1
         # insert_plaintext_files(conn1, cur1, files)
 
-        # Step 2: Encrypt from Node 1 to Node 2 for aes encrption
-        # encrypt_and_transfer(conn1, cur1, conn2, cur2, label="3MB file", iterations=2)
+        # Step 2: AES Encryption with Prometheus metrics
+        encrypt_and_transfer(conn1, cur1, conn2, cur2, label="3MB file", iterations=250)
 
-        # Step 3: Decrypt from Node 2 to Node 3 for aes decrption
-        decrypt_and_store(c onn2, cur2, conn3, cur3, label="3MB file", iterations=2)
+        # Optional: Step 3
+        # decrypt_and_store(conn2, cur2, conn3, cur3, label="3MB file", iterations=250)
 
     except Exception as e:
         print(f"[ERROR - main connection setup] {e}")
