@@ -24,6 +24,7 @@ ENCRYPTION_LOOP_ITERATIONS = Counter('encryption_loop_iterations_total', 'Total 
 
 # ========== Load AES Encryption Module ==========
 AES = importlib.import_module("Encryption.aes_encryption")
+# blowfish = importlib.import_module("Encryption.blowfish_encryption")
 
 # ========== PostgreSQL Grid Nodes ==========
 grid_nodes = [
@@ -63,8 +64,9 @@ def insert_plaintext_files(conn, cursor, files):
         print(f"[ERROR - file insert] {e}")
 
 # ========== Step 2: Encrypt from Node 1 to Node 2 ==========
-def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='1MB file', iterations=250):
+def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
     try:
+        # Fetch plaintext once at the start
         source_cursor.execute("""
             SELECT text_to_encrypt FROM data_store 
             WHERE file_size_label = %s 
@@ -76,33 +78,47 @@ def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor,
             return
 
         plain_text = row[0]
+        encrypted = None
 
         for i in range(iterations):
             print(f"[INFO] Encryption loop iteration {i + 1} for {label}")
+
+            # Record system usage (if needed for monitoring)
             get_system_usage()
 
+            # Encrypt the data
+            
+            #Point A
             encrypted = encrypt_value(plain_text)
 
+            # Prometheus metrics
             BYTES_ENCRYPTED.labels(label).inc(len(plain_text.encode()))
             ENCRYPTION_OPERATIONS.labels(label).inc()
             ENCRYPTION_LOOP_ITERATIONS.labels(label).inc()
 
-            target_cursor.execute("""
-                UPDATE data_store 
-                SET AES_ENCRYPTION = %s 
-                WHERE file_size_label = %s;
-            """, (encrypted, label))
-            target_conn.commit()
+            # Optional: Add delay ONLY for Prometheus visualization
+            # time.sleep(0.1)
 
-            time.sleep(0.1)  # Slow down loop for better Prometheus visualization
+        # ✅ Store encrypted result **once** after the entire loop
+        target_cursor.execute("""
+            UPDATE data_store 
+            SET AES_ENCRYPTION = %s 
+            WHERE file_size_label = %s;
+        """, (encrypted, label))
+        target_conn.commit()
+
+        print(f"[DONE] Encryption complete for '{label}' after {iterations} iterations.")
 
     except Exception as e:
         ENCRYPTION_FAILURES.labels(label).inc()
         print(f"[ERROR - AES encryption] {e}")
 
+
 # ========== Step 3: Decrypt from Node 2 to Node 3 ==========
-def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='1MB file', iterations=250):
+
+def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50, sleep_between=0.0):
     try:
+        # Fetch the encrypted data ONCE
         source_cursor.execute("""
             SELECT AES_ENCRYPTION FROM data_store 
             WHERE file_size_label = %s 
@@ -115,12 +131,24 @@ def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, la
 
         encrypted_text = row[0]
 
+        # Decrypt in-memory, loop through decryption operations
         for i in range(iterations):
-            print(f"[INFO] Decryption loop iteration {i + 1} for {label}")
+            print(f"[INFO] Decryption iteration {i + 1} for '{label}'")
+
+            # System usage before operation
+            cpu = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory().used / (1024 * 1024)  # in MB
+            CPU_USAGE.set(cpu)
+            MEMORY_USAGE.set(memory)
+
+            # Perform decryption
             decrypted = decrypt_value(encrypted_text)
 
+            # Metrics increment
             DECRYPTION_OPERATIONS.labels(label).inc()
+            # BYTES_DECRYPTED.labels(label).inc(len(decrypted.encode(errors='ignore')))
 
+            # Store decrypted result
             target_cursor.execute("""
                 UPDATE data_store 
                 SET AES_DECRYPTION = %s 
@@ -128,9 +156,13 @@ def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, la
             """, (decrypted, label))
             target_conn.commit()
 
-            time.sleep(0.1)
+           
 
-        print(f"[DONE] AES decryption complete for '{label}'")
+            # Optional delay for Prometheus visualization; set sleep_between=0 for fastest
+            if sleep_between > 0:
+                time.sleep(sleep_between)
+
+        print(f"[DONE] Decryption complete for '{label}' after {iterations} iterations.")
 
     except Exception as e:
         DECRYPTION_FAILURES.labels(label).inc()
@@ -162,10 +194,10 @@ if __name__ == "__main__":
         # insert_plaintext_files(conn1, cur1, files)
 
         # Step 2: AES Encryption with Prometheus metrics
-        encrypt_and_transfer(conn1, cur1, conn2, cur2, label="3MB file", iterations=250)
+        # encrypt_and_transfer(conn1, cur1, conn2, cur2, label="100KB file", iterations=50)
 
         # Optional: Step 3
-        # decrypt_and_store(conn2, cur2, conn3, cur3, label="3MB file", iterations=250)
+        decrypt_and_store(conn2, cur2, conn3, cur3, label="100KB file", iterations=50)
 
     except Exception as e:
         print(f"[ERROR - main connection setup] {e}")

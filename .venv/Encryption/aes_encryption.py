@@ -11,6 +11,7 @@ def encrypt(plain_text: str) -> str:
     ciphertext, tag = cipher.encrypt_and_digest(plain_text.encode('utf-8'))
     encrypted_blob = cipher.nonce + tag + ciphertext
     encrypted_b64 = base64.b64encode(encrypted_blob).decode('utf-8')
+    #Point B
     return encrypted_b64
 
 def decrypt(encrypted_b64: str) -> str:
