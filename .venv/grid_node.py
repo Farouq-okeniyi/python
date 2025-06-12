@@ -29,7 +29,7 @@ def log_to_csv(operation, iteration, file_size_label, cpu_percent, memory_used, 
         writer = csv.writer(file)
         writer.writerow([operation, iteration, file_size_label, cpu_percent, memory_used, time_taken])
 
-# ========== Encryption Function ==========
+# Encryption Function
 def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
     try:
         source_cursor.execute("SELECT text_to_encrypt FROM data_store WHERE file_size_label = %s LIMIT 1;", (label,))
@@ -44,14 +44,9 @@ def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor,
         for i in range(1, iterations + 1):
             print(f"[INFO] Encryption iteration {i} for {label}")
 
-            cpu = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory().used / (1024 * 1024)
+            encrypted, metrics = AES.encrypt(plain_text)
 
-            start_time = time.time()
-            encrypted = AES.encrypt(plain_text)
-            end_time = time.time()
-
-            log_to_csv("encryption", i, label, cpu, memory, end_time - start_time)
+            log_to_csv("encryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"])
 
         target_cursor.execute("UPDATE data_store SET AES_ENCRYPTION = %s WHERE file_size_label = %s;", (encrypted, label))
         target_conn.commit()
@@ -60,7 +55,8 @@ def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor,
     except Exception as e:
         print(f"[ERROR - AES encryption] {e}")
 
-# ========== Decryption Function ==========
+
+# Decryption Function
 def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
     try:
         source_cursor.execute("SELECT AES_ENCRYPTION FROM data_store WHERE file_size_label = %s LIMIT 1;", (label,))
@@ -74,14 +70,9 @@ def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, la
         for i in range(1, iterations + 1):
             print(f"[INFO] Decryption iteration {i} for '{label}'")
 
-            cpu = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory().used / (1024 * 1024)
+            decrypted, metrics = AES.decrypt(encrypted_text)
 
-            start_time = time.time()
-            decrypted = AES.decrypt(encrypted_text)
-            end_time = time.time()
-
-            log_to_csv("decryption", i, label, cpu, memory, end_time - start_time)
+            log_to_csv("decryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"])
 
             target_cursor.execute("UPDATE data_store SET AES_DECRYPTION = %s WHERE file_size_label = %s;", (decrypted, label))
             target_conn.commit()
