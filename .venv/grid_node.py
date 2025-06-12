@@ -1,30 +1,12 @@
 import psycopg2
 import importlib
 import psutil
-from prometheus_client import start_http_server, Summary, Gauge, Counter
 import time
-
-# ========== Configuration ==========
-start_http_server(8000)
-
-# ========== Prometheus Metrics ==========
-REQUEST_TIME = Summary('crypto_processing_seconds', 'Time spent processing encryption/decryption')
-
-CPU_USAGE = Gauge('cpu_usage_percent', 'CPU usage percentage during crypto operations')
-MEMORY_USAGE = Gauge('memory_usage_mb', 'Memory usage (MB) during crypto operations')
-
-BYTES_ENCRYPTED = Counter('bytes_encrypted_total', 'Total number of bytes encrypted', ['file_size_label'])
-ENCRYPTION_OPERATIONS = Counter('encryption_operations_total', 'Total encryption operations performed', ['file_size_label'])
-ENCRYPTION_FAILURES = Counter('encryption_failures_total', 'Total failed encryption operations', ['file_size_label'])
-
-DECRYPTION_OPERATIONS = Counter('decryption_operations_total', 'Total decryption operations performed', ['file_size_label'])
-DECRYPTION_FAILURES = Counter('decryption_failures_total', 'Total failed decryption operations', ['file_size_label'])
-
-ENCRYPTION_LOOP_ITERATIONS = Counter('encryption_loop_iterations_total', 'Total iterations of encryption loop', ['file_size_label'])
+import csv
+import os
 
 # ========== Load AES Encryption Module ==========
 AES = importlib.import_module("Encryption.aes_encryption")
-# blowfish = importlib.import_module("Encryption.blowfish_encryption")
 
 # ========== PostgreSQL Grid Nodes ==========
 grid_nodes = [
@@ -33,45 +15,24 @@ grid_nodes = [
     {"dbname": "grid_node_3", "user": "postgres", "password": "panda020704", "host": "localhost", "port": 5433},
 ]
 
-# ========== System Monitoring ==========
-def get_system_usage():
-    CPU_USAGE.set(psutil.cpu_percent(interval=1))
-    MEMORY_USAGE.set(psutil.virtual_memory().used / (1024 * 1024))  # Convert to MB
+# ========== CSV Setup ==========
+CSV_FILE = "crypto_metrics.csv"
 
-# ========== Encryption Wrapper ==========
-@REQUEST_TIME.time()
-def encrypt_value(value: str):
-    return AES.encrypt(value)
+def init_csv():
+    if not os.path.exists(CSV_FILE):
+        with open(CSV_FILE, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["operation", "iteration", "file_size_label", "cpu_percent", "memory_used_mb", "time_seconds"])
 
-# ========== Decryption Wrapper ==========
-@REQUEST_TIME.time()
-def decrypt_value(encrypted_value: str):
-    return AES.decrypt(encrypted_value)
+def log_to_csv(operation, iteration, file_size_label, cpu_percent, memory_used, time_taken):
+    with open(CSV_FILE, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow([operation, iteration, file_size_label, cpu_percent, memory_used, time_taken])
 
-# ========== Step 1: Insert Plaintext Files into Node 1 ==========
-def insert_plaintext_files(conn, cursor, files):
-    try:
-        for size_label, filepath in files.items():
-            with open(filepath, 'rb') as f:
-                file_data = f.read()
-            decoded_text = file_data.decode(errors='ignore')
-            cursor.execute("""
-                INSERT INTO data_store (file_size_label, text_to_encrypt)
-                VALUES (%s, %s)
-            """, (size_label, decoded_text))
-        conn.commit()
-    except Exception as e:
-        print(f"[ERROR - file insert] {e}")
-
-# ========== Step 2: Encrypt from Node 1 to Node 2 ==========
+# ========== Encryption Function ==========
 def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
     try:
-        # Fetch plaintext once at the start
-        source_cursor.execute("""
-            SELECT text_to_encrypt FROM data_store 
-            WHERE file_size_label = %s 
-            LIMIT 1;
-        """, (label,))
+        source_cursor.execute("SELECT text_to_encrypt FROM data_store WHERE file_size_label = %s LIMIT 1;", (label,))
         row = source_cursor.fetchone()
         if not row:
             print(f"[INFO] No plaintext found for label '{label}'")
@@ -80,50 +41,29 @@ def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor,
         plain_text = row[0]
         encrypted = None
 
-        for i in range(iterations):
-            print(f"[INFO] Encryption loop iteration {i + 1} for {label}")
+        for i in range(1, iterations + 1):
+            print(f"[INFO] Encryption iteration {i} for {label}")
 
-            # Record system usage (if needed for monitoring)
-            get_system_usage()
+            cpu = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory().used / (1024 * 1024)
 
-            # Encrypt the data
-            
-            #Point A
-            encrypted = encrypt_value(plain_text)
+            start_time = time.time()
+            encrypted = AES.encrypt(plain_text)
+            end_time = time.time()
 
-            # Prometheus metrics
-            BYTES_ENCRYPTED.labels(label).inc(len(plain_text.encode()))
-            ENCRYPTION_OPERATIONS.labels(label).inc()
-            ENCRYPTION_LOOP_ITERATIONS.labels(label).inc()
+            log_to_csv("encryption", i, label, cpu, memory, end_time - start_time)
 
-            # Optional: Add delay ONLY for Prometheus visualization
-            # time.sleep(0.1)
-
-        # ✅ Store encrypted result **once** after the entire loop
-        target_cursor.execute("""
-            UPDATE data_store 
-            SET AES_ENCRYPTION = %s 
-            WHERE file_size_label = %s;
-        """, (encrypted, label))
+        target_cursor.execute("UPDATE data_store SET AES_ENCRYPTION = %s WHERE file_size_label = %s;", (encrypted, label))
         target_conn.commit()
-
-        print(f"[DONE] Encryption complete for '{label}' after {iterations} iterations.")
+        print(f"[DONE] Encryption complete for '{label}'")
 
     except Exception as e:
-        ENCRYPTION_FAILURES.labels(label).inc()
         print(f"[ERROR - AES encryption] {e}")
 
-
-# ========== Step 3: Decrypt from Node 2 to Node 3 ==========
-
-def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50, sleep_between=0.0):
+# ========== Decryption Function ==========
+def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
     try:
-        # Fetch the encrypted data ONCE
-        source_cursor.execute("""
-            SELECT AES_ENCRYPTION FROM data_store 
-            WHERE file_size_label = %s 
-            LIMIT 1;
-        """, (label,))
+        source_cursor.execute("SELECT AES_ENCRYPTION FROM data_store WHERE file_size_label = %s LIMIT 1;", (label,))
         row = source_cursor.fetchone()
         if not row:
             print(f"[INFO] No AES encrypted data found for label '{label}'")
@@ -131,45 +71,30 @@ def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, la
 
         encrypted_text = row[0]
 
-        # Decrypt in-memory, loop through decryption operations
-        for i in range(iterations):
-            print(f"[INFO] Decryption iteration {i + 1} for '{label}'")
+        for i in range(1, iterations + 1):
+            print(f"[INFO] Decryption iteration {i} for '{label}'")
 
-            # System usage before operation
             cpu = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory().used / (1024 * 1024)  # in MB
-            CPU_USAGE.set(cpu)
-            MEMORY_USAGE.set(memory)
+            memory = psutil.virtual_memory().used / (1024 * 1024)
 
-            # Perform decryption
-            decrypted = decrypt_value(encrypted_text)
+            start_time = time.time()
+            decrypted = AES.decrypt(encrypted_text)
+            end_time = time.time()
 
-            # Metrics increment
-            DECRYPTION_OPERATIONS.labels(label).inc()
-            # BYTES_DECRYPTED.labels(label).inc(len(decrypted.encode(errors='ignore')))
+            log_to_csv("decryption", i, label, cpu, memory, end_time - start_time)
 
-            # Store decrypted result
-            target_cursor.execute("""
-                UPDATE data_store 
-                SET AES_DECRYPTION = %s 
-                WHERE file_size_label = %s;
-            """, (decrypted, label))
+            target_cursor.execute("UPDATE data_store SET AES_DECRYPTION = %s WHERE file_size_label = %s;", (decrypted, label))
             target_conn.commit()
 
-           
-
-            # Optional delay for Prometheus visualization; set sleep_between=0 for fastest
-            if sleep_between > 0:
-                time.sleep(sleep_between)
-
-        print(f"[DONE] Decryption complete for '{label}' after {iterations} iterations.")
+        print(f"[DONE] Decryption complete for '{label}'")
 
     except Exception as e:
-        DECRYPTION_FAILURES.labels(label).inc()
         print(f"[ERROR - AES decryption] {e}")
 
-# ========== Main Execution ==========
+# ========== Main ==========
 if __name__ == "__main__":
+    init_csv()
+
     files = {
         "100KB file": "C:/Users/USER/Documents/pythonfinal/100KB.txt",
         "500KB file": "C:/Users/USER/Documents/pythonfinal/500KB.txt",
@@ -190,13 +115,12 @@ if __name__ == "__main__":
         conn3 = psycopg2.connect(**grid_nodes[2])
         cur3 = conn3.cursor()
 
-        # Optional: Step 1
-        # insert_plaintext_files(conn1, cur1, files)
+        # Optional: insert_plaintext_files(conn1, cur1, files)
 
-        # Step 2: AES Encryption with Prometheus metrics
-        # encrypt_and_transfer(conn1, cur1, conn2, cur2, label="100KB file", iterations=50)
+        # Run Encryption
+        encrypt_and_transfer(conn1, cur1, conn2, cur2, label="100KB file", iterations=50)
 
-        # Optional: Step 3
+        # Run Decryption
         decrypt_and_store(conn2, cur2, conn3, cur3, label="100KB file", iterations=50)
 
     except Exception as e:
