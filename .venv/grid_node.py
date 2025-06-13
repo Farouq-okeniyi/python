@@ -17,6 +17,7 @@ grid_nodes = [
 
 # ========== CSV Setup ==========
 CSV_FILE = "crypto_metrics.csv"
+#change the name of the csv file to keep track to the algrithm and also the number of tries
 
 def init_csv():
     if not os.path.exists(CSV_FILE):
