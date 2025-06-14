@@ -16,7 +16,7 @@ grid_nodes = [
 ]
 
 # ========== CSV Setup ==========
-CSV_FILE = "crypto_metrics_full.csv"
+CSV_FILE = "AES_METRICS_100KB_1stSample.csv"
 
 def init_csv():
     if not os.path.exists(CSV_FILE):
@@ -41,7 +41,6 @@ def encrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor, 
             return
 
         plain_text = row[0]
-        encrypted = None
 
         for i in range(1, total_iterations + 1):
             encrypted, metrics = AES.encrypt(plain_text)
@@ -53,10 +52,7 @@ def encrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor, 
             end_db = time.perf_counter()
             db_time = end_db - start_db
 
-            log_to_csv("encryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"], db_time)
-            print(f"[{i}/{total_iterations}] Encryption time: {metrics['time_diff_sec']:.6f} sec | DB time: {db_time:.6f} sec")
-
-        print(f"[DONE] Encryption completed for '{label}' with {total_iterations} metric samples.")
+            log_to_csv("encryption", i, label, metrics["cpu_percent"], metrics["memory_diff_mb"], metrics["time_diff_sec"], db_time)
 
     except Exception as e:
         print(f"[ERROR - AES encryption] {e}")
@@ -72,7 +68,6 @@ def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor, 
             return
 
         encrypted_text = row[0]
-        decrypted = None
 
         for i in range(1, total_iterations + 1):
             decrypted, metrics = AES.decrypt(encrypted_text)
@@ -83,10 +78,7 @@ def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor, 
             end_db = time.perf_counter()
             db_time = end_db - start_db
 
-            log_to_csv("decryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"], db_time)
-            print(f"[{i}/{total_iterations}] Decryption time: {metrics['time_diff_sec']:.6f} sec | DB time: {db_time:.6f} sec")
-
-        print(f"[DONE] Decryption completed for '{label}' with {total_iterations} metric samples.")
+            log_to_csv("decryption", i, label, metrics["cpu_percent"], metrics["memory_diff_mb"], metrics["time_diff_sec"], db_time)
 
     except Exception as e:
         print(f"[ERROR - AES decryption] {e}")
