@@ -3,25 +3,26 @@ from Crypto.Random import get_random_bytes
 import base64
 import psutil
 import time
+import os
 
 key = b'Sixteen byte key'
 
 def encrypt(plain_text: str) -> tuple[str, dict]:
-    before_cpu = psutil.cpu_percent(interval=0.0)
-    before_mem = psutil.virtual_memory().used / (1024 * 1024)
+    process = psutil.Process(os.getpid())
+    # before_cpu = psutil.cpu_percent(interval=None)
+    before_mem = process.memory_info().rss / (1024 * 1024)
     start_time = time.time()
-
     cipher = AES.new(key, AES.MODE_EAX)
     ciphertext, tag = cipher.encrypt_and_digest(plain_text.encode('utf-8'))
     encrypted_blob = cipher.nonce + tag + ciphertext
     encrypted_b64 = base64.b64encode(encrypted_blob).decode('utf-8')
 
     end_time = time.time()
-    after_cpu = psutil.cpu_percent(interval=0.0)
-    after_mem = psutil.virtual_memory().used / (1024 * 1024)
+    after_cpu = psutil.cpu_percent(interval=0.1)
+    after_mem = process.memory_info().rss / (1024 * 1024)
 
     metrics = {
-        "cpu_diff": after_cpu - before_cpu,
+        "cpu_diff": after_cpu,
         "memory_diff_mb": after_mem - before_mem,
         "time_diff_sec": end_time - start_time
     }

@@ -16,22 +16,23 @@ grid_nodes = [
 ]
 
 # ========== CSV Setup ==========
-CSV_FILE = "crypto_metrics.csv"
-#change the name of the csv file to keep track to the algrithm and also the number of tries
+CSV_FILE = "crypto_metrics_full.csv"
 
 def init_csv():
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["operation", "iteration", "file_size_label", "cpu_percent", "memory_used_mb", "time_seconds"])
+            writer.writerow(["operation", "iteration_number", "file_size_label",
+                             "cpu_percent", "memory_used_mb", "process_time_sec", "db_write_time_sec"])
 
-def log_to_csv(operation, iteration, file_size_label, cpu_percent, memory_used, time_taken):
+def log_to_csv(operation, iteration, file_size_label, cpu_percent, memory_used, process_time, db_write_time):
     with open(CSV_FILE, mode='a', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow([operation, iteration, file_size_label, cpu_percent, memory_used, time_taken])
+        writer.writerow([operation, iteration, file_size_label, cpu_percent, memory_used, process_time, db_write_time])
 
-# Encryption Function
-def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
+
+# ========== Encryption Function ==========
+def encrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', total_iterations=50):
     try:
         source_cursor.execute("SELECT text_to_encrypt FROM data_store WHERE file_size_label = %s LIMIT 1;", (label,))
         row = source_cursor.fetchone()
@@ -42,23 +43,27 @@ def encrypt_and_transfer(source_conn, source_cursor, target_conn, target_cursor,
         plain_text = row[0]
         encrypted = None
 
-        for i in range(1, iterations + 1):
-            print(f"[INFO] Encryption iteration {i} for {label}")
-
+        for i in range(1, total_iterations + 1):
             encrypted, metrics = AES.encrypt(plain_text)
 
-            log_to_csv("encryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"])
+            # Measure database write (UPDATE) time
+            start_db = time.perf_counter()
+            target_cursor.execute("UPDATE data_store SET AES_ENCRYPTION = %s WHERE file_size_label = %s;", (encrypted, label))
+            target_conn.commit()
+            end_db = time.perf_counter()
+            db_time = end_db - start_db
 
-        target_cursor.execute("UPDATE data_store SET AES_ENCRYPTION = %s WHERE file_size_label = %s;", (encrypted, label))
-        target_conn.commit()
-        print(f"[DONE] Encryption complete for '{label}'")
+            log_to_csv("encryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"], db_time)
+            print(f"[{i}/{total_iterations}] Encryption time: {metrics['time_diff_sec']:.6f} sec | DB time: {db_time:.6f} sec")
+
+        print(f"[DONE] Encryption completed for '{label}' with {total_iterations} metric samples.")
 
     except Exception as e:
         print(f"[ERROR - AES encryption] {e}")
 
 
-# Decryption Function
-def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', iterations=50):
+# ========== Decryption Function ==========
+def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor, label='100KB file', total_iterations=50):
     try:
         source_cursor.execute("SELECT AES_ENCRYPTION FROM data_store WHERE file_size_label = %s LIMIT 1;", (label,))
         row = source_cursor.fetchone()
@@ -67,35 +72,29 @@ def decrypt_and_store(source_conn, source_cursor, target_conn, target_cursor, la
             return
 
         encrypted_text = row[0]
+        decrypted = None
 
-        for i in range(1, iterations + 1):
-            print(f"[INFO] Decryption iteration {i} for '{label}'")
-
+        for i in range(1, total_iterations + 1):
             decrypted, metrics = AES.decrypt(encrypted_text)
 
-            log_to_csv("decryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"])
-
+            start_db = time.perf_counter()
             target_cursor.execute("UPDATE data_store SET AES_DECRYPTION = %s WHERE file_size_label = %s;", (decrypted, label))
             target_conn.commit()
+            end_db = time.perf_counter()
+            db_time = end_db - start_db
 
-        print(f"[DONE] Decryption complete for '{label}'")
+            log_to_csv("decryption", i, label, metrics["cpu_diff"], metrics["memory_diff_mb"], metrics["time_diff_sec"], db_time)
+            print(f"[{i}/{total_iterations}] Decryption time: {metrics['time_diff_sec']:.6f} sec | DB time: {db_time:.6f} sec")
+
+        print(f"[DONE] Decryption completed for '{label}' with {total_iterations} metric samples.")
 
     except Exception as e:
         print(f"[ERROR - AES decryption] {e}")
 
+
 # ========== Main ==========
 if __name__ == "__main__":
     init_csv()
-
-    files = {
-        "100KB file": "C:/Users/USER/Documents/pythonfinal/100KB.txt",
-        "500KB file": "C:/Users/USER/Documents/pythonfinal/500KB.txt",
-        "1MB file": "C:/Users/USER/Documents/pythonfinal/1MB.txt",
-        "2MB file": "C:/Users/USER/Documents/pythonfinal/2MB.txt",
-        "3MB file": "C:/Users/USER/Documents/pythonfinal/3MB.txt",
-        "4MB file": "C:/Users/USER/Documents/pythonfinal/4MB.txt",
-        "5MB file": "C:/Users/USER/Documents/pythonfinal/5MB.txt",
-    }
 
     try:
         conn1 = psycopg2.connect(**grid_nodes[0])
@@ -107,13 +106,9 @@ if __name__ == "__main__":
         conn3 = psycopg2.connect(**grid_nodes[2])
         cur3 = conn3.cursor()
 
-        # Optional: insert_plaintext_files(conn1, cur1, files)
-
-        # Run Encryption
-        encrypt_and_transfer(conn1, cur1, conn2, cur2, label="100KB file", iterations=50)
-
-        # Run Decryption
-        decrypt_and_store(conn2, cur2, conn3, cur3, label="100KB file", iterations=50)
+        # ========== Run encryption & decryption ==========
+        encrypt_and_log_all(conn1, cur1, conn2, cur2, label="100KB file", total_iterations=50)
+        decrypt_and_log_all(conn2, cur2, conn3, cur3, label="100KB file", total_iterations=50)
 
     except Exception as e:
         print(f"[ERROR - main connection setup] {e}")
