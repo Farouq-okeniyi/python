@@ -1,63 +1,55 @@
 from Crypto.Cipher import Blowfish
-from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
 import psutil
 import time
 
-key = get_random_bytes(16)
+KEY = b'myverysecurekey'  # 4-56 bytes
+BLOCK_SIZE = 8            # Blowfish block size
 
-def pad(text):
-    while len(text) % 8 != 0:
-        text += " "
-    return text
+def encrypt(plaintext: str):
+    cipher = Blowfish.new(KEY, Blowfish.MODE_ECB)
+    plaintext_bytes = plaintext.encode('utf-8')
+    padded_data = pad(plaintext_bytes, BLOCK_SIZE)
 
-def get_nonzero_cpu_percent(max_attempts=3, fallback=1.0):
-    for _ in range(max_attempts):
-        cpu = psutil.cpu_percent(interval=0.05)
-        if cpu != 0.0:
-            return cpu
-    return fallback
+    start = time.perf_counter()
+    cpu_before = psutil.cpu_percent()
+    memory_before = psutil.virtual_memory().used / (1024 * 1024)
 
-def encrypt(data):
-    process = psutil.Process()
-    before_mem = process.memory_info().rss / (1024 * 1024)
+    ciphertext = cipher.encrypt(padded_data)
 
-    psutil.cpu_percent(interval=None)  # Warm-up
-    start_time = time.time()
-
-    cipher = Blowfish.new(key, Blowfish.MODE_ECB)
-    padded = pad(data)
-    encrypted_bytes = cipher.encrypt(padded.encode())
-
-    end_time = time.time()
-    after_mem = process.memory_info().rss / (1024 * 1024)
-
-    cpu_percent = get_nonzero_cpu_percent()
+    cpu_after = psutil.cpu_percent()
+    memory_after = psutil.virtual_memory().used / (1024 * 1024)
+    end = time.perf_counter()
 
     metrics = {
-        "cpu_percent": cpu_percent,
-        "memory_diff_mb": after_mem - before_mem,
-        "time_diff_sec": end_time - start_time
+        "cpu_percent": cpu_after,
+        "memory_diff_mb": memory_after - memory_before,
+        "time_diff_sec": end - start
     }
-    return encrypted_bytes, metrics
 
-def decrypt(encrypted_bytes):
-    process = psutil.Process()
-    before_mem = process.memory_info().rss / (1024 * 1024)
+    return ciphertext, metrics
+def decrypt(ciphertext: bytes):
+    if isinstance(ciphertext, memoryview):  # PostgreSQL might return memoryview
+        ciphertext = ciphertext.tobytes()
 
-    psutil.cpu_percent(interval=None)
-    start_time = time.time()
+    cipher = Blowfish.new(KEY, Blowfish.MODE_ECB)
 
-    cipher = Blowfish.new(key, Blowfish.MODE_ECB)
-    decrypted = cipher.decrypt(encrypted_bytes).decode().strip()
+    start = time.perf_counter()
+    cpu_before = psutil.cpu_percent()
+    memory_before = psutil.virtual_memory().used / (1024 * 1024)
 
-    end_time = time.time()
-    after_mem = process.memory_info().rss / (1024 * 1024)
-    cpu_percent = get_nonzero_cpu_percent()
+    decrypted_padded = cipher.decrypt(ciphertext)
+    plaintext_bytes = unpad(decrypted_padded, BLOCK_SIZE)
+    plaintext = plaintext_bytes.decode('utf-8')
+
+    cpu_after = psutil.cpu_percent()
+    memory_after = psutil.virtual_memory().used / (1024 * 1024)
+    end = time.perf_counter()
 
     metrics = {
-        "cpu_percent": cpu_percent,
-        "memory_diff_mb": after_mem - before_mem,
-        "time_diff_sec": end_time - start_time
+        "cpu_percent": cpu_after,
+        "memory_diff_mb": memory_after - memory_before,
+        "time_diff_sec": end - start
     }
 
-    return decrypted, metrics
+    return plaintext, metrics
