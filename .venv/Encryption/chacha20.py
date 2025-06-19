@@ -4,132 +4,77 @@ import base64
 import psutil
 import time
 import tracemalloc
-from typing import Tuple
 
-# Fixed 32-byte key for ChaCha20
-KEY = b'This_is_32_bytes_long_key_demo!!'  # 32 bytes
-NONCE_SIZE = 12  # ChaCha20 requires 12-byte nonce
+KEY = b'This_is_32_bytes_long_key_demo!!'  # 32 bytes fixed key for ChaCha20
+NONCE_SIZE = 12  # ChaCha20 requires a 12-byte nonce
 
-
-def get_nonzero_cpu_percent(max_attempts: int = 3, fallback: float = 1.0) -> float:
-    """
-    Measures CPU usage percentage, retries if 0.0 is returned.
-    """
+def get_nonzero_cpu_percent(max_attempts=3, fallback=1.0):
     for _ in range(max_attempts):
         cpu = psutil.cpu_percent(interval=0.05)
         if cpu != 0.0:
             return cpu
     return fallback
 
-
-def encrypt(plaintext: str) -> Tuple[str, dict]:
-    """
-    Encrypts the plaintext using ChaCha20 and returns encrypted data and standard metrics.
-    
-    Args:
-        plaintext (str): The text to encrypt
-        
-    Returns:
-        Tuple[str, dict]: Encrypted text (base64 encoded) and metrics dictionary
-    """
-    # Warm up CPU measurement
+def encrypt(plain_text: str) -> tuple[str, dict]:
     psutil.cpu_percent(interval=None)
-    
-    # Start memory and time tracking
     tracemalloc.start()
-    start_snapshot = tracemalloc.take_snapshot()
+    snapshot1 = tracemalloc.take_snapshot()
+
     start_time = time.perf_counter()
 
-    try:
-        # Generate random nonce
-        nonce = get_random_bytes(NONCE_SIZE)
-        
-        # Create cipher and encrypt
-        cipher = ChaCha20.new(key=KEY, nonce=nonce)
-        ciphertext = cipher.encrypt(plaintext.encode('utf-8'))
-        
-        # Combine nonce + ciphertext and encode to base64
-        encrypted = base64.b64encode(nonce + ciphertext).decode('utf-8')
+    nonce = get_random_bytes(NONCE_SIZE)
+    cipher = ChaCha20.new(key=KEY, nonce=nonce)
+    ciphertext = cipher.encrypt(plain_text.encode('utf-8'))
+    encrypted_blob = nonce + ciphertext
+    encrypted_b64 = base64.b64encode(encrypted_blob).decode('utf-8')
 
-        # End tracking
-        end_time = time.perf_counter()
-        end_snapshot = tracemalloc.take_snapshot()
-        
-        # Calculate memory difference
-        top_stats = end_snapshot.compare_to(start_snapshot, 'filename')
-        total_bytes = sum(stat.size_diff for stat in top_stats)
-        memory_used_mb = total_bytes / (1024 * 1024)
-        
-        tracemalloc.stop()
+    end_time = time.perf_counter()
 
-        # Get CPU usage
-        cpu_percent = get_nonzero_cpu_percent()
+    snapshot2 = tracemalloc.take_snapshot()
+    tracemalloc.stop()
 
-        metrics = {
-            "cpu_percent": cpu_percent,
-            "memory_diff_mb": memory_used_mb,
-            "time_diff_sec": end_time - start_time
-        }
+    stats = snapshot2.compare_to(snapshot1, 'lineno')
+    memory_used_bytes = sum(stat.size_diff for stat in stats)
+    memory_used_mb = memory_used_bytes / (1024 * 1024)
 
-        return encrypted, metrics
+    metrics = {
+        "cpu_percent": get_nonzero_cpu_percent(),
+        "memory_diff_mb": memory_used_mb,
+        "time_diff_sec": end_time - start_time
+    }
 
-    except Exception as e:
-        tracemalloc.stop()
-        raise Exception(f"ChaCha20 encryption failed: {str(e)}")
+    return encrypted_b64, metrics
 
+def decrypt(encrypted_b64: str) -> tuple[str, dict]:
+    encrypted_b64 = encrypted_b64.strip()
+    encrypted_b64 += '=' * (-len(encrypted_b64) % 4)
+    encrypted_blob = base64.b64decode(encrypted_b64)
+    nonce = encrypted_blob[:NONCE_SIZE]
+    ciphertext = encrypted_blob[NONCE_SIZE:]
 
-def decrypt(encrypted: str) -> Tuple[str, dict]:
-    """
-    Decrypts a ChaCha20 encrypted string and returns plaintext and standard metrics.
-    
-    Args:
-        encrypted (str): Base64 encoded encrypted text
-        
-    Returns:
-        Tuple[str, dict]: Decrypted plaintext and metrics dictionary
-    """
-    # Warm up CPU measurement
     psutil.cpu_percent(interval=None)
-    
-    # Start memory and time tracking
     tracemalloc.start()
-    start_snapshot = tracemalloc.take_snapshot()
+    snapshot1 = tracemalloc.take_snapshot()
+
     start_time = time.perf_counter()
 
-    try:
-        # Decode from base64
-        decoded = base64.b64decode(encrypted.encode('utf-8'))
-        
-        # Extract nonce and ciphertext
-        nonce = decoded[:NONCE_SIZE]
-        ciphertext = decoded[NONCE_SIZE:]
-        
-        # Create cipher and decrypt
-        cipher = ChaCha20.new(key=KEY, nonce=nonce)
-        decrypted = cipher.decrypt(ciphertext).decode('utf-8')
+    cipher = ChaCha20.new(key=KEY, nonce=nonce)
+    decrypted_bytes = cipher.decrypt(ciphertext)
+    decrypted_text = decrypted_bytes.decode('utf-8')
 
-        # End tracking
-        end_time = time.perf_counter()
-        end_snapshot = tracemalloc.take_snapshot()
-        
-        # Calculate memory difference
-        top_stats = end_snapshot.compare_to(start_snapshot, 'filename')
-        total_bytes = sum(stat.size_diff for stat in top_stats)
-        memory_used_mb = total_bytes / (1024 * 1024)
-        
-        tracemalloc.stop()
+    end_time = time.perf_counter()
 
-        # Get CPU usage
-        cpu_percent = get_nonzero_cpu_percent()
+    snapshot2 = tracemalloc.take_snapshot()
+    tracemalloc.stop()
 
-        metrics = {
-            "cpu_percent": cpu_percent,
-            "memory_diff_mb": memory_used_mb,
-            "time_diff_sec": end_time - start_time
-        }
+    stats = snapshot2.compare_to(snapshot1, 'lineno')
+    memory_used_bytes = sum(stat.size_diff for stat in stats)
+    memory_used_mb = memory_used_bytes / (1024 * 1024)
 
-        return decrypted, metrics
+    metrics = {
+        "cpu_percent": get_nonzero_cpu_percent(),
+        "memory_diff_mb": memory_used_mb,
+        "time_diff_sec": end_time - start_time
+    }
 
-    except Exception as e:
-        tracemalloc.stop()
-        raise Exception(f"ChaCha20 decryption failed: {str(e)}")
+    return decrypted_text, metrics

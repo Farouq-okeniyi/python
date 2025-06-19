@@ -7,12 +7,15 @@ import os
 import math
 from Crypto.Util.Padding import pad, unpad
 from psycopg2 import Binary
+import base64
 
 # ======================== CONFIGURATION ========================
 LABEL = '3MB file'
-TOTAL_ITERATIONS = 1
+TOTAL_ITERATIONS = 50
 
-CSV_FILE = "BLOWFISH_METRICS_3MB.csv"
+TRY_NUMBER = 4 # or however you want to increment for different runs
+
+
 BLOWFISH_BLOCK_SIZE = 8  # Blowfish block size
 
 # ======================== MODULES ========================
@@ -59,19 +62,23 @@ def encrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor):
             return
 
         plain_text = row[0]
-        print(plain_text)
         encrypted_result = None
 
         for i in range(1, TOTAL_ITERATIONS + 1):
-            encrypted, metrics = BLOWFISH.encrypt(plain_text)
-            encrypted_result = encrypted
-            entropy_value = calculate_entropy(encrypted)
+            encrypted_b64, metrics = BLOWFISH.encrypt(plain_text)
+            encrypted_result = encrypted_b64
+            
+            # Convert base64 to bytes to calculate entropy
+            encrypted_bytes = base64.b64decode(encrypted_b64)
+            entropy_value = calculate_entropy(encrypted_bytes)
 
             log_to_csv("encryption", i, LABEL, metrics["cpu_percent"], metrics["memory_diff_mb"], 
-                      metrics["time_diff_sec"], len(encrypted), entropy_value)
+                      metrics["time_diff_sec"], len(encrypted_bytes), entropy_value)
 
-        # Store as hex string for better compatibility
-        hex_encrypted = encrypted_result.hex()
+        # Convert base64 to bytes, then to hex string for storage
+        encrypted_bytes = base64.b64decode(encrypted_result)
+        hex_encrypted = encrypted_bytes.hex()
+        
         target_cursor.execute("UPDATE data_store SET BLOWFISH_ENCRYPTION = %s WHERE file_size_label = %s;",
                               (hex_encrypted, LABEL))
         target_conn.commit()
@@ -81,7 +88,6 @@ def encrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor):
         print(f"[ERROR - BLOWFISH encryption] {e}")
         import traceback
         traceback.print_exc()
-
 def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor):
     """Decrypt using hex storage approach"""
     try:
@@ -92,13 +98,11 @@ def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor):
             return
 
         hex_encrypted = row[0]
-        print(f"[DEBUG] Retrieved hex data type: {type(hex_encrypted)}")
-        print(f"[DEBUG] First 50 chars: {str(hex_encrypted)[:50]}")
         
         # Convert hex string back to bytes
         try:
             encrypted_text = bytes.fromhex(hex_encrypted)
-            print(f"[DEBUG] Successfully converted hex to bytes, length: {len(encrypted_text)}")
+          
         except ValueError as e:
             print(f"[ERROR] Failed to convert hex to bytes: {e}")
             return
@@ -117,7 +121,6 @@ def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor):
                              (decrypted_result, LABEL))
         target_conn.commit()
 
-        print("[INFO] Decryption complete.")
         
     except Exception as e:
         print(f"[ERROR - BLOWFISH decryption] {e}")
@@ -125,45 +128,46 @@ def decrypt_and_log_all(source_conn, source_cursor, target_conn, target_cursor):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    init_csv()
-    
-    conn1 = None
-    conn2 = None  
-    conn3 = None
-    cur1 = None
-    cur2 = None
-    cur3 = None
-    
-    try:
-        conn1 = psycopg2.connect(**grid_nodes[0])
-        cur1 = conn1.cursor()
+    for try_number in range(1, TRY_NUMBER + 1):
+        file_size = LABEL.replace(' ', '').replace('file', '').upper()  # '500KB'
+        CSV_FILE = f"BLOWFISH_METRICS_{file_size}_{try_number}TRY_{TOTAL_ITERATIONS}loops.csv"
 
-        conn2 = psycopg2.connect(**grid_nodes[1])
-        cur2 = conn2.cursor()
+        init_csv()
 
-        conn3 = psycopg2.connect(**grid_nodes[2])
-        cur3 = conn3.cursor()
+        conn1 = conn2 = conn3 = None
+        cur1 = cur2 = cur3 = None
+        
+        try:
+            conn1 = psycopg2.connect(**grid_nodes[0])
+            cur1 = conn1.cursor()
 
-        encrypt_and_log_all(conn1, cur1, conn2, cur2)
-        decrypt_and_log_all(conn2, cur2, conn3, cur3)
+            conn2 = psycopg2.connect(**grid_nodes[1])
+            cur2 = conn2.cursor()
 
-    except Exception as e:
-        print(f"[ERROR - main connection setup] {e}")
-        import traceback
-        traceback.print_exc()
+            conn3 = psycopg2.connect(**grid_nodes[2])
+            cur3 = conn3.cursor()
 
-    finally:
-        # Improved cleanup with proper variable checking
-        connections = [(conn1, cur1), (conn2, cur2), (conn3, cur3)]
-        for conn, cur in connections:
-            try:
-                if cur: 
-                    cur.close()
-                if conn: 
-                    conn.close()
-            except Exception as cleanup_error:
-                print(f"[WARNING] Error during cleanup: {cleanup_error}")
-                pass
+            encrypt_and_log_all(conn1, cur1, conn2, cur2)
+            decrypt_and_log_all(conn2, cur2, conn3, cur3)
+
+        except Exception as e:
+            print(f"[ERROR - TRY {try_number}] {e}")
+            import traceback
+            traceback.print_exc()
+
+        finally:
+            connections = [(conn1, cur1), (conn2, cur2), (conn3, cur3)]
+            for conn, cur in connections:
+                try:
+                    if cur:
+                        cur.close()
+                    if conn:
+                        conn.close()
+                except Exception as cleanup_error:
+                    print(f"[WARNING] Error during cleanup: {cleanup_error}")
+
+        print(f"[INFO] Completed TRY {try_number}\n")
+
 
 
 # PostgreSQL Binary Data Storage Issue
