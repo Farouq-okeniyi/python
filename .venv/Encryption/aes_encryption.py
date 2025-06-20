@@ -1,10 +1,19 @@
+from Crypto.PublicKey import ECC
 from Crypto.Cipher import AES
+from Crypto.Hash import SHA256
+from Crypto.Protocol.KDF import HKDF
 import base64
+import json
 import psutil
 import time
 import tracemalloc
 
-key = b'Sixteen byte key'  # 16 bytes = 128-bit key
+# Load ECC key pair
+with open("ecc_private.pem", "rt") as f:
+    private_key = ECC.import_key(f.read())
+
+with open("ecc_public.pem", "rt") as f:
+    public_key = ECC.import_key(f.read())
 
 def get_nonzero_cpu_percent(max_attempts=3, fallback=1.0):
     for _ in range(max_attempts):
@@ -13,26 +22,34 @@ def get_nonzero_cpu_percent(max_attempts=3, fallback=1.0):
             return cpu
     return fallback
 
-def encrypt(plain_text: str) -> tuple[str, dict]:
+def encrypt(data: str) -> tuple[str, dict]:
     psutil.cpu_percent(interval=None)
     tracemalloc.start()
     snapshot1 = tracemalloc.take_snapshot()
 
     start_time = time.perf_counter()
 
-    cipher = AES.new(key, AES.MODE_EAX)
-    ciphertext, tag = cipher.encrypt_and_digest(plain_text.encode('utf-8'))
-    encrypted_blob = cipher.nonce + tag + ciphertext
-    encrypted_b64 = base64.b64encode(encrypted_blob).decode('utf-8')
+    ephemeral_key = ECC.generate(curve='P-256')
+    shared_secret = ephemeral_key.d * public_key.pointQ
+    shared_secret_bytes = int(shared_secret.x).to_bytes(32, byteorder='big')
+    sym_key = HKDF(shared_secret_bytes, 16, b'', SHA256)
+
+    cipher = AES.new(sym_key, AES.MODE_EAX)
+    ciphertext, tag = cipher.encrypt_and_digest(data.encode('utf-8'))
+
+    encrypted_package = {
+        'ciphertext': base64.b64encode(ciphertext).decode(),
+        'nonce': base64.b64encode(cipher.nonce).decode(),
+        'tag': base64.b64encode(tag).decode(),
+        'ephemeral_pubkey': ephemeral_key.public_key().export_key(format='PEM')
+    }
 
     end_time = time.perf_counter()
-
     snapshot2 = tracemalloc.take_snapshot()
     tracemalloc.stop()
 
-    # Calculate actual memory used during encryption
     stats = snapshot2.compare_to(snapshot1, 'lineno')
-    memory_used_bytes = sum([stat.size_diff for stat in stats])
+    memory_used_bytes = sum(stat.size_diff for stat in stats)
     memory_used_mb = memory_used_bytes / (1024 * 1024)
 
     metrics = {
@@ -41,34 +58,33 @@ def encrypt(plain_text: str) -> tuple[str, dict]:
         "time_diff_sec": end_time - start_time
     }
 
-    return encrypted_b64, metrics
+    return json.dumps(encrypted_package), metrics
 
-def decrypt(encrypted_b64: str) -> tuple[str, dict]:
-    encrypted_b64 = encrypted_b64.strip()
-    encrypted_b64 += '=' * (-len(encrypted_b64) % 4)
-    encrypted_blob = base64.b64decode(encrypted_b64)
-    nonce = encrypted_blob[:16]
-    tag = encrypted_blob[16:32]
-    ciphertext = encrypted_blob[32:]
-
+def decrypt(encrypted_json: str) -> tuple[str, dict]:
     psutil.cpu_percent(interval=None)
     tracemalloc.start()
     snapshot1 = tracemalloc.take_snapshot()
 
     start_time = time.perf_counter()
 
-    cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
-    decrypted_bytes = cipher.decrypt_and_verify(ciphertext, tag)
-    decrypted_text = decrypted_bytes.decode('utf-8')
+    data = json.loads(encrypted_json)
+    ephemeral_pubkey = ECC.import_key(data['ephemeral_pubkey'])
+    shared_secret = private_key.d * ephemeral_pubkey.pointQ
+    shared_secret_bytes = int(shared_secret.x).to_bytes(32, byteorder='big')
+    sym_key = HKDF(shared_secret_bytes, 16, b'', SHA256)
+
+    cipher = AES.new(sym_key, AES.MODE_EAX, nonce=base64.b64decode(data['nonce']))
+    plaintext = cipher.decrypt_and_verify(
+        base64.b64decode(data['ciphertext']),
+        base64.b64decode(data['tag'])
+    )
 
     end_time = time.perf_counter()
-
     snapshot2 = tracemalloc.take_snapshot()
     tracemalloc.stop()
 
-    # Calculate actual memory used during decryption
     stats = snapshot2.compare_to(snapshot1, 'lineno')
-    memory_used_bytes = sum([stat.size_diff for stat in stats])
+    memory_used_bytes = sum(stat.size_diff for stat in stats)
     memory_used_mb = memory_used_bytes / (1024 * 1024)
 
     metrics = {
@@ -77,4 +93,4 @@ def decrypt(encrypted_b64: str) -> tuple[str, dict]:
         "time_diff_sec": end_time - start_time
     }
 
-    return decrypted_text, metrics
+    return plaintext.decode('utf-8'), metrics
